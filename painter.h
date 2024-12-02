@@ -10,8 +10,11 @@
  * 	2) model transforms		[X]
  *
  *  	1) depth buffering		[x]
- * 	2) normals interpolated for lighting
- * 	3) phong shaidn
+ * 	2) normals interpolated for lighting [x]
+ * 	3) phong shaidn [ ]
+ *
+ * 	5) Dynamic running, 2 threads one producer other consumer.
+ * 	4) Get a scene to render instead of just one teapot.
  */
 
 typedef struct
@@ -21,6 +24,8 @@ typedef struct
 	int width;
 	int height;
 
+	Vec3 camPos;
+	Vec3 lookat;
 	Mat4x4 camera;
 
 	float far;
@@ -33,6 +38,16 @@ typedef struct
 		WIREFRAME,
 		FILL
 	} fill_mode;
+
+	// Lighting
+
+	float ambientIntensity;
+	Vec4 ambientColor;
+
+	Vec3 lightPositions[10];
+	Vec4 lightColors   [10];
+
+	int lightsCount;
 } painter_t;
 
 typedef struct Vertex

@@ -1,9 +1,9 @@
 CC = gcc
-CFLAGS = -Wall -Wextra -ggdb -std=c11 -O0
+CFLAGS = -Wall -Wextra -ggdb -std=c11 -O3 -DVIDEO # -DINTERACTIVE
 
 WIN_WIDTH  = 800
 WIN_HEIGHT = 800
-WIN_FRAMES = 26
+WIN_FRAMES = 1200
 
 SRC=$(wildcard *.c)
 OBJ=$(patsubst %.c, %.o, $(SRC))
@@ -14,6 +14,9 @@ all: $(EXE)
 
 $(EXE): $(OBJ)
 	$(CC) $(CFLAGS) -o $@ $^ -lm
+
+interactive.o: interactive.c
+	$(CC) $(CFLAGS) -c -o $@ $^
 
 main.o: main.c
 	$(CC) $(CFLAGS) -D WIN_WIDTH=$(WIN_WIDTH) -D WIN_HEIGHT=$(WIN_HEIGHT) -D WIN_FRAMES=$(WIN_FRAMES) -c -o $@ $^

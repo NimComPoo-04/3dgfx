@@ -7,7 +7,7 @@ void painter_clear(painter_t *p)
 {
 	memset(p->buffer, 0, p->width * p->height * sizeof(uint32_t));
 	for(int i = 0; i < p->width * p->height; i++)
-		p->depth[i] = 1.f;
+		p->depth[i] = p->far;
 }
 
 static inline Vertex vertex_interpolate(Vertex start, Vertex end, float t)
@@ -23,11 +23,45 @@ static inline void put_pixel(painter_t *p, int x, int y, float z, uint32_t color
 	if(y < 0 || y >= p->height || x < 0 || x >= p->width)
 		return;
 
-	if(p->depth[y * p->width + x] <= z)
+	if(p->depth[y * p->width + x] < z)
 		return;
 
 	p->buffer[y * p->width + x] = color;
 	p->depth[y * p->width + x] = z;
+}
+
+static inline uint32_t compute_color(Vec3 pos, Vec3 norm, Vec3 viewpos,
+		Vec4 baseColor,
+		Vec4 ambient, float intesity,
+		Vec3 *lightPos, Vec4 *lightColor, int count)
+{
+	Vec4 mcol = {{0}};
+	// Ambient
+	mcol = Vec4_Add(mcol, Vec4_Scale(ambient, intesity));
+
+	// Diffuse
+	for(int i = 0; i < count; i++) 
+	{
+		Vec3 dir = Vec3_Normalize(Vec3_Sub(lightPos[i], pos));
+		float nt = Vec3_Dot(dir, norm);
+		mcol = Vec4_Add(mcol, Vec4_Scale(lightColor[i], nt));
+	}
+
+	// Specular highlights
+
+	Vec3 viewdir = Vec3_Sub(viewpos, pos);
+	Vec3 reflect = Vec3_Normalize(Vec3_Transform(Mat4x4_Rotate(norm, PI/2), viewdir));
+
+	for(int i = 0; i < count; i++)
+	{
+		Vec3 dir = Vec3_Normalize(Vec3_Sub(lightPos[i], pos));
+		float nt = Vec3_Dot(reflect, dir);
+		float spec = powf(nt, 8);
+
+		mcol = Vec4_Add(mcol, Vec4_Scale(VEC4(1, 1, 1, 1), spec * 0.7));
+	}
+
+	return Color_Convert(Vec4_Mul(baseColor, mcol));
 }
 
 void painter_point(painter_t *p, Vertex k)
@@ -122,12 +156,6 @@ void painter_line(painter_t *p, Vertex a, Vertex b)
 
 	draw_line(p, v1.x, v1.y, v1.z, v2.x, v2.y, v2.z, a.col, b.col);
 }
-
-// either have 2 which means actual clipping
-// or 1 which means no clipping
-// or 0 which means the whole triangle is thrown out
-
-// FIXME: clipping does not subdevide triangle rn, need to do that.
 
 int clip_triangle(Vec3 norm, Vec3 pos, Vertex a, Vertex b, Vertex c, Vertex *clps)
 {
@@ -231,35 +259,34 @@ int clip_triangle(Vec3 norm, Vec3 pos, Vertex a, Vertex b, Vertex c, Vertex *clp
 
 void painter_triangle(painter_t *p, Vertex a, Vertex b, Vertex c)
 {
-	// fprintf(stderr, "%lf\n", a.pos.z);
-
-	//FIXME: Do proper normal mapping stuff man
-	Vec3 dv12 = Vec3_Sub(a.pos, b.pos);
-	Vec3 dv32 = Vec3_Sub(c.pos, b.pos);
-
-	Vec3 norm = Vec3_Cross(VEC3(dv12.x, dv12.y, dv12.z), VEC3(dv32.x, dv32.y, dv32.z));
-	Vec3 light = Vec3_Sub(VEC3(0, 0, 0), VEC3(20, -20, 20));
-
 	// Camera transform
 	a.pos = Vec3_Transform(p->camera, a.pos);
 	b.pos = Vec3_Transform(p->camera, b.pos);
 	c.pos = Vec3_Transform(p->camera, c.pos);
 
+	// Camera correcting various lights and stuff
+	Vec3 viewpos = Vec3_Transform(p->camera, p->camPos);
+
+	Vec3 lightPos[10] = {0};
+
+	for(int i = 0; i < p->lightsCount; i++)
+		lightPos[i] = Vec3_Transform(p->camera, p->lightPositions[i]);
+
 	// Back-face culling bois
-	dv12 = Vec3_Sub(a.pos, b.pos);
-	dv32 = Vec3_Sub(c.pos, b.pos);
+	Vec3 dv12 = Vec3_Sub(a.pos, b.pos);
+	Vec3 dv32 = Vec3_Sub(c.pos, b.pos);
 	float shade = Vec3_Dot(Vec3_Cross(VEC3(dv12.x, dv12.y, dv12.z), VEC3(dv32.x, dv32.y, dv32.z)), VEC3(0, 0, -1));
 
 	if(shade <= -0.0006) return; // FIXME: idk why it does not work with zero but whatever man
-
+				     
 	// Clip triangles against 4 planes
 	
 	static Vertex clipped[3 * 64] = {0}; int clipped_count = 0;
 	static Vertex scratch[3 * 64] = {0}; int scratch_count = 0;
 
 	float angle = p->fov/2;
-	float cs = cos(angle);
-	float ss = sin(angle);
+	float cs = cosf(angle);
+	float ss = sinf(angle);
 
 	struct {Vec3 norm; Vec3 pos;}
 	clipping_planes[] = {
@@ -277,7 +304,7 @@ void painter_triangle(painter_t *p, Vertex a, Vertex b, Vertex c)
 	clipped[clipped_count++] = b;
 	clipped[clipped_count++] = c;
 
-	for(int i = 0; i < sizeof(clipping_planes)/sizeof(clipping_planes[0]); i++)
+	for(size_t i = 0; i < sizeof(clipping_planes)/sizeof(clipping_planes[0]); i++)
 	{
 		scratch_count = 0;
 		for(int j = 0; j < clipped_count; j+=3)
@@ -341,25 +368,17 @@ void painter_triangle(painter_t *p, Vertex a, Vertex b, Vertex c)
 					float t2 = CLAMP(((y3 - y1) * (x - x3) + (x1 - x3) * (y - y3)) / d, 0, 1);
 					float t3 = CLAMP(1. - t1 - t2, 0, 1);
 
-					float z = t1 * a.pos.z + t2 * b.pos.z + t3 * c.pos.z;
+					Vec3 pos = Vec3_Add(Vec3_Add(Vec3_Scale(a.pos, t1), Vec3_Scale(b.pos, t2)), Vec3_Scale(c.pos, t3));
+					Vec3 norm = Vec3_Add(Vec3_Add(Vec3_Scale(a.norm, t1), Vec3_Scale(b.norm, t2)), Vec3_Scale(c.norm, t3));
+					Vec4 baseColor = Vec4_Add(Vec4_Add(Vec4_Scale(a.col, t1), Vec4_Scale(b.col, t2)), Vec4_Scale(c.col, t3));
 
-					Vec4 col = Vec4_Add(Vec4_Add(Vec4_Scale(a.col, t1), Vec4_Scale(b.col, t2)), Vec4_Scale(c.col, t3));
-					//Vec3 norm = Vec3_Add(Vec3_Add(Vec3_Scale(a.norm, t1), Vec3_Scale(b.norm, t2)), Vec3_Scale(c.norm, t3));
+					uint32_t color = compute_color(pos, norm, viewpos,
+							baseColor,
+							p->ambientColor, p->ambientIntensity,
+							lightPos, p->lightColors,
+							p->lightsCount);
 
-					float shaden = 0;
-
-					shaden += CLAMP(Vec3_Dot(norm, VEC3(10, 20, 0)), 0, 1);
-					shaden += CLAMP(Vec3_Dot(norm, VEC3(0, -20, 0)), 0, 1);
-
-					shaden += CLAMP(Vec3_Dot(norm, VEC3(10, 0, 0)), 0, 1);
-					shaden += CLAMP(Vec3_Dot(norm, VEC3(-10, 0, 0)), 0, 1);
-
-					shaden += CLAMP(Vec3_Dot(norm, VEC3(0, 0, 10)), 0, 1);
-					shaden += CLAMP(Vec3_Dot(norm, VEC3(10, 0, -10)), 0, 1);
-
-					uint32_t color = Color_Convert(Vec4_Add(VEC4(0.275, 0.035, 0.549, 1), Vec4_Scale(col, fabsf(shaden))));
-
-					put_pixel(p, x, y, z, color);
+					put_pixel(p, x, y, pos.z, color);
 				}
 			}
 
@@ -371,45 +390,32 @@ void painter_triangle(painter_t *p, Vertex a, Vertex b, Vertex c)
 				if(start_x > end_x)
 					SWAP(start_x, end_x, int);
 
-
 				for(int x = start_x; x <= end_x; x++)
 				{
 					float t1 = CLAMP(((y2 - y3) * (x - x3) + (x3 - x2) * (y - y3)) / d, 0, 1);
 					float t2 = CLAMP(((y3 - y1) * (x - x3) + (x1 - x3) * (y - y3)) / d, 0, 1);
 					float t3 = CLAMP(1. - t1 - t2, 0, 1);
 
-					float z = t1 * a.pos.z + t2 * b.pos.z + t3 * c.pos.z;
+					Vec3 pos = Vec3_Add(Vec3_Add(Vec3_Scale(a.pos, t1), Vec3_Scale(b.pos, t2)), Vec3_Scale(c.pos, t3));
+					Vec3 norm = Vec3_Add(Vec3_Add(Vec3_Scale(a.norm, t1), Vec3_Scale(b.norm, t2)), Vec3_Scale(c.norm, t3));
+					Vec4 baseColor = Vec4_Add(Vec4_Add(Vec4_Scale(a.col, t1), Vec4_Scale(b.col, t2)), Vec4_Scale(c.col, t3));
 
-					Vec4 col = Vec4_Add(Vec4_Add(Vec4_Scale(a.col, t1), Vec4_Scale(b.col, t2)), Vec4_Scale(c.col, t3));
-					//Vec3 norm = Vec3_Add(Vec3_Add(Vec3_Scale(a.norm, t1), Vec3_Scale(b.norm, t2)), Vec3_Scale(c.norm, t3));
+					uint32_t color = compute_color(pos, norm, viewpos,
+							baseColor,
+							p->ambientColor, p->ambientIntensity,
+							lightPos, p->lightColors,
+							p->lightsCount);
 
-					float shaden = 0;
-
-					shaden += CLAMP(Vec3_Dot(norm, VEC3(10, 20, 0)), 0, 1);
-					shaden += CLAMP(Vec3_Dot(norm, VEC3(0, -20, 0)), 0, 1);
-
-					shaden += CLAMP(Vec3_Dot(norm, VEC3(10, 0, 0)), 0, 1);
-					shaden += CLAMP(Vec3_Dot(norm, VEC3(-10, 0, 0)), 0, 1);
-
-					shaden += CLAMP(Vec3_Dot(norm, VEC3(0, 0, 10)), 0, 1);
-					shaden += CLAMP(Vec3_Dot(norm, VEC3(10, 0, -10)), 0, 1);
-
-					uint32_t color = Color_Convert(Vec4_Add(VEC4(0.275, 0.035, 0.549, 1), Vec4_Scale(col, fabsf(shaden))));
-
-					put_pixel(p, x, y, z, color);
+					put_pixel(p, x, y, pos.z, color);
 				}
 			}
 		}
 		else if(p->fill_mode == WIREFRAME)
 		{
-			Vec4 WHITE = {{ 1., 1., 1., 1. }};
-
-			(a.pos.z + 1) / 2;
-
 			// We set the z value to -3 so that they are drawn over absolutely
-			draw_line(p, a.pos.x, a.pos.y, -3, b.pos.x, b.pos.y, -3, WHITE, WHITE);
-			draw_line(p, a.pos.x, a.pos.y, -3, c.pos.x, c.pos.y, -3, WHITE, WHITE);
-			draw_line(p, b.pos.x, b.pos.y, -3, c.pos.x, c.pos.y, -3, WHITE, WHITE);
+			draw_line(p, a.pos.x, a.pos.y, -3, b.pos.x, b.pos.y, -3, a.col, b.col);
+			draw_line(p, a.pos.x, a.pos.y, -3, c.pos.x, c.pos.y, -3, a.col, c.col);
+			draw_line(p, b.pos.x, b.pos.y, -3, c.pos.x, c.pos.y, -3, b.col, c.col);
 		}
 
 	}
